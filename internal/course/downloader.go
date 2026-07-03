@@ -22,6 +22,7 @@ import (
 	"github.com/nicoxiang/geektime-downloader/internal/pkg/filenamify"
 	"github.com/nicoxiang/geektime-downloader/internal/pkg/files"
 	"github.com/nicoxiang/geektime-downloader/internal/pkg/logger"
+	"github.com/nicoxiang/geektime-downloader/internal/progress"
 	"github.com/nicoxiang/geektime-downloader/internal/ui"
 	"github.com/nicoxiang/geektime-downloader/internal/video"
 )
@@ -39,9 +40,10 @@ type CourseDownloader struct {
 	concurrency        int
 	waitRand           *rand.Rand
 	downloadingSpinner *spinner.Spinner
+	progressReporter   progress.Reporter
 }
 
-func NewCourseDownloader(ctx context.Context, cfg *config.AppConfig, geektimeClient *geektime.Client, sp *spinner.Spinner) *CourseDownloader {
+func NewCourseDownloader(ctx context.Context, cfg *config.AppConfig, geektimeClient *geektime.Client, sp *spinner.Spinner, reporter progress.Reporter) *CourseDownloader {
 	concurrency := int(math.Ceil(float64(runtime.NumCPU()) / 2.0))
 	if concurrency <= 0 {
 		concurrency = 1
@@ -53,7 +55,13 @@ func NewCourseDownloader(ctx context.Context, cfg *config.AppConfig, geektimeCli
 		concurrency:        concurrency,
 		waitRand:           rand.New(rand.NewSource(time.Now().UnixNano())),
 		downloadingSpinner: sp,
+		progressReporter:   reporter,
 	}
+}
+
+// DownloadFolderForTitle returns the directory path for a course title without downloading.
+func (d *CourseDownloader) DownloadFolderForTitle(title string) (string, error) {
+	return d.mkDownloadColumnDir(title)
 }
 
 // DownloadAll manages the bulk download process for all articles in a selected product (course).
@@ -71,11 +79,17 @@ func (d *CourseDownloader) DownloadAll(course geektime.Course, productType ui.Pr
 
 		for _, article := range course.Articles {
 			skip := d.skipDownloadTextArticle(article, columnDir, false)
+			if skip {
+				d.reportSkipped(article.AID, article.Title, "already_downloaded")
+			}
 			if !skip {
 				logger.Infof("Begin download article, articleID: %d, articleTitle: %s", article.AID, article.Title)
+				d.reportStart(article.AID, article.Title, "fetching")
 				if err := d.downloadTextArticle(article, columnDir, false); err != nil {
+					d.reportFailed(article.AID, err)
 					return err
 				}
+				d.reportComplete(article.AID, article.Title, columnDir)
 				d.waitRandomTime()
 			}
 			increaseDownloadedTextArticleCount(total, &downloaded)
@@ -92,12 +106,18 @@ func (d *CourseDownloader) DownloadAll(course geektime.Course, productType ui.Pr
 				}
 				if universityArticleDetail.Data.VideoID == "" {
 					skip = true
+					d.reportSkipped(article.AID, article.Title, "university_text_article")
 				}
+			} else if skip {
+				d.reportSkipped(article.AID, article.Title, "already_downloaded")
 			}
 			if !skip {
+				d.reportStart(article.AID, article.Title, "downloading_video")
 				if err := d.downloadVideoArticle(course, productType, article, columnDir); err != nil {
+					d.reportFailed(article.AID, err)
 					return err
 				}
+				d.reportComplete(article.AID, article.Title, columnDir)
 				d.waitRandomTime()
 			}
 		}
@@ -120,15 +140,29 @@ func (d *CourseDownloader) DownloadArticle(course geektime.Course, productType u
 		defer d.downloadingSpinner.Stop()
 		skip := d.skipDownloadTextArticle(article, columnDir, overwrite)
 		if skip {
+			d.reportSkipped(article.AID, article.Title, "already_downloaded")
 			return nil
 		}
-		return d.downloadTextArticle(article, columnDir, overwrite)
+		d.reportStart(article.AID, article.Title, "fetching")
+		if err := d.downloadTextArticle(article, columnDir, overwrite); err != nil {
+			d.reportFailed(article.AID, err)
+			return err
+		}
+		d.reportComplete(article.AID, article.Title, columnDir)
+		return nil
 	} else {
 		skip := d.skipDownloadVideoArticle(article, columnDir, overwrite)
 		if skip {
+			d.reportSkipped(article.AID, article.Title, "already_downloaded")
 			return nil
 		}
-		return d.downloadVideoArticle(course, productType, article, columnDir)
+		d.reportStart(article.AID, article.Title, "downloading_video")
+		if err := d.downloadVideoArticle(course, productType, article, columnDir); err != nil {
+			d.reportFailed(article.AID, err)
+			return err
+		}
+		d.reportComplete(article.AID, article.Title, columnDir)
+		return nil
 	}
 }
 
@@ -212,6 +246,7 @@ func (d *CourseDownloader) downloadTextArticle(article geektime.Article, columnD
 	}
 
 	if needDownloadPDF {
+		d.reportPhase(article.AID, article.Title, "generating_pdf")
 		if err := pdf.PrintArticlePageToPDF(d.ctx,
 			article,
 			columnDir,
@@ -223,6 +258,7 @@ func (d *CourseDownloader) downloadTextArticle(article geektime.Article, columnD
 	}
 
 	if needDownloadMD {
+		d.reportPhase(article.AID, article.Title, "generating_markdown")
 		if err := markdown.Download(d.ctx,
 			articleInfo.Data.ArticleContent,
 			article.Title,
@@ -234,6 +270,7 @@ func (d *CourseDownloader) downloadTextArticle(article geektime.Article, columnD
 	}
 
 	if needDownloadAudio {
+		d.reportPhase(article.AID, article.Title, "downloading_audio")
 		if err := audio.DownloadAudio(d.ctx, articleInfo.Data.AudioDownloadURL, columnDir, article.Title); err != nil {
 			return err
 		}
@@ -335,4 +372,51 @@ func getVideoURLFromArticleContent(content string) (hasVideo bool, videoURL stri
 func (d *CourseDownloader) waitRandomTime() {
 	randomMillis := d.cfg.Interval*1000 + d.waitRand.Intn(2000)
 	time.Sleep(time.Duration(randomMillis) * time.Millisecond)
+}
+
+func (d *CourseDownloader) reportStart(aid int, title, phase string) {
+	if d.progressReporter != nil {
+		d.progressReporter.OnArticleStart(aid, title, phase)
+	}
+}
+
+func (d *CourseDownloader) reportPhase(aid int, title, phase string) {
+	if d.progressReporter != nil {
+		d.progressReporter.OnArticleStart(aid, title, phase)
+	}
+}
+
+func (d *CourseDownloader) reportSkipped(aid int, title, reason string) {
+	if d.progressReporter != nil {
+		d.progressReporter.OnArticleSkipped(aid, title)
+	}
+	_ = reason
+}
+
+func (d *CourseDownloader) reportFailed(aid int, err error) {
+	if d.progressReporter != nil {
+		d.progressReporter.OnArticleFailed(aid, err)
+	}
+}
+
+func (d *CourseDownloader) reportComplete(aid int, title, columnDir string) {
+	if d.progressReporter == nil {
+		return
+	}
+	var files []string
+	base := filenamify.Filenamify(title)
+	if d.cfg.ColumnOutputType&outputPDF != 0 {
+		files = append(files, base+pdf.PDFExtension)
+	}
+	if d.cfg.ColumnOutputType&outputMD != 0 {
+		files = append(files, base+markdown.MDExtension)
+	}
+	if d.cfg.ColumnOutputType&outputAudio != 0 {
+		files = append(files, base+audio.MP3Extension)
+	}
+	if len(files) == 0 {
+		files = append(files, base+video.TSExtension)
+	}
+	_ = columnDir
+	d.progressReporter.OnArticleComplete(aid, files)
 }

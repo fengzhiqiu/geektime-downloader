@@ -27,11 +27,16 @@ type AppConfig struct {
 }
 
 func ReadCookiesFromInput(cfg *AppConfig) []*http.Cookie {
+	return BuildCookies(cfg.Gcid, cfg.Gcess)
+}
+
+// BuildCookies constructs geektime auth cookies from raw values.
+func BuildCookies(gcid, gcess string) []*http.Cookie {
 	oneyear := time.Now().Add(180 * 24 * time.Hour)
 	cookies := make([]*http.Cookie, 2)
 	m := make(map[string]string, 2)
-	m[geektime.GCID] = cfg.Gcid
-	m[geektime.GCESS] = cfg.Gcess
+	m[geektime.GCID] = gcid
+	m[geektime.GCESS] = gcess
 	c := 0
 	for k, v := range m {
 		cookies[c] = &http.Cookie{

@@ -37,7 +37,7 @@ func NewFSMRunner(ctx context.Context, cfg *config.AppConfig, geektimeClient *ge
 		config:           cfg,
 		sp:               sp,
 		geektimeClient:   geektimeClient,
-		courseDownloader: course.NewCourseDownloader(ctx, cfg, geektimeClient, sp),
+		courseDownloader: course.NewCourseDownloader(ctx, cfg, geektimeClient, sp, nil),
 	}
 }
 

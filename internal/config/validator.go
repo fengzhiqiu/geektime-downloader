@@ -109,3 +109,24 @@ func validateTiming(cfg *AppConfig) error {
 
 	return nil
 }
+
+// ValidateServeConfig validates configuration for the API server mode.
+// Cookies are optional at startup and can be set via the session API.
+func ValidateServeConfig(cfg *AppConfig) error {
+	if err := validateComments(cfg); err != nil {
+		return err
+	}
+	if err := validateQuality(cfg); err != nil {
+		return err
+	}
+	if err := validateColumnOutputType(cfg); err != nil {
+		return err
+	}
+	if err := validateLogLevel(cfg); err != nil {
+		return err
+	}
+	if err := validateTiming(cfg); err != nil {
+		return err
+	}
+	return nil
+}

@@ -44,6 +44,9 @@ var rootCmd = &cobra.Command{
 	SilenceUsage: true,
 	PreRunE: func(cmd *cobra.Command, args []string) error {
 		logger.Init(cfg.LogLevel)
+		if cmd.Name() == "serve" {
+			return config.ValidateServeConfig(&cfg)
+		}
 		return config.ValidateConfig(&cfg)
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
