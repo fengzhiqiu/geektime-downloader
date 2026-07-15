@@ -17,8 +17,6 @@ const (
 	Origin = "Origin"
 	// UserAgent ...
 	UserAgent = "User-Agent"
-	// DefaultUserAgent ...
-	DefaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/81.0.4044.92 Safari/537.36"
 )
 
 // A Client manages communication with the Geektime API.

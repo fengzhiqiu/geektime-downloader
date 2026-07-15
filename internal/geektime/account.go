@@ -90,8 +90,8 @@ func Auth(cs []*http.Cookie) error {
 
 	client := resty.New().
 		SetTimeout(DefaultTimeout).
-		SetHeader(UserAgent, DefaultUserAgent).
 		SetLogger(logger.DiscardLogger{})
+	ApplyBrowserHeaders(client)
 
 	logger.Infof("Auth request start")
 
@@ -99,6 +99,7 @@ func Auth(cs []*http.Cookie) error {
 		SetQueryParams(params).
 		SetCookies(cs).
 		SetHeader(Origin, DefaultBaseURL).
+		SetHeader(RefererHeader, DefaultReferer).
 		SetResult(&res).
 		Get(GeekBangAccountBaseURL + V1AuthPath)
 
