@@ -24,6 +24,10 @@ type AppConfig struct {
 	Interval               int
 	IsEnterprise           bool
 	LogLevel               string
+	JobTimeout             time.Duration
+	HeartbeatTimeout       time.Duration
+	RateLimitCooldown      time.Duration
+	SegmentTimeout         time.Duration
 }
 
 func ReadCookiesFromInput(cfg *AppConfig) []*http.Cookie {
