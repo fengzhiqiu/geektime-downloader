@@ -47,7 +47,7 @@ func TestRunJobWatchdogTimeout(t *testing.T) {
 
 	w := NewWorker(store, &fakeExecutor{err: context.DeadlineExceeded}, nil, Stability{
 		JobTimeout: time.Minute, HeartbeatTimeout: time.Minute, RateLimitCooldown: time.Minute,
-	})
+	}, nil)
 	w.runJob(ctx, j.ID)
 
 	got, _ := store.GetJob(ctx, j.ID)
@@ -68,7 +68,7 @@ func TestRateLimitCooldownGate(t *testing.T) {
 	defer cancel()
 	w := NewWorker(store, &fakeExecutor{err: nil}, nil, Stability{
 		JobTimeout: time.Minute, HeartbeatTimeout: time.Minute, RateLimitCooldown: 200 * time.Millisecond,
-	})
+	}, nil)
 	w.Start(ctx)
 
 	// 模拟一次限流：置冷却到 200ms 后
@@ -89,7 +89,7 @@ func TestRateLimitCooldownGate(t *testing.T) {
 
 func TestRateLimitCooldownGrows(t *testing.T) {
 	store := newTestStoreTB(t)
-	w := NewWorker(store, &fakeExecutor{}, nil, Stability{RateLimitCooldown: 100 * time.Millisecond})
+	w := NewWorker(store, &fakeExecutor{}, nil, Stability{RateLimitCooldown: 100 * time.Millisecond}, nil)
 	w.applyRateLimitCooldown()
 	first := w.rateLimitUntil.Load()
 	w.applyRateLimitCooldown()
@@ -97,4 +97,30 @@ func TestRateLimitCooldownGrows(t *testing.T) {
 	if second-first < int64(100*time.Millisecond) {
 		t.Fatal("cooldown should grow on repeated rate limits")
 	}
+}
+
+func TestWorkerStatsAndExposure(t *testing.T) {
+	store := newTestStoreTB(t)
+	stats := &Stats{}
+	w := NewWorker(store, &fakeExecutor{err: context.DeadlineExceeded}, nil, Stability{
+		JobTimeout: time.Minute, HeartbeatTimeout: time.Minute, RateLimitCooldown: time.Minute,
+	}, stats)
+	ctx := context.Background()
+	j, err := store.CreateJob(ctx, service.DownloadRequest{ProductType: "column", ProductID: 1, Mode: "all"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.runJob(ctx, j.ID)
+
+	snap := w.Stats()
+	if snap["TIMEOUT"] != 1 {
+		t.Fatalf("want TIMEOUT=1, got %v", snap)
+	}
+	if w.Uptime() < 0 {
+		t.Fatal("uptime should be non-negative")
+	}
+	if w.RateLimitUntil().IsZero() {
+		// no rate limit applied in this path -> zero is fine
+	}
+	_ = w.LastActiveAt() // must not panic
 }

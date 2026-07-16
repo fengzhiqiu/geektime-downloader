@@ -9,6 +9,7 @@ import (
 
 	"github.com/nicoxiang/geektime-downloader/internal/apperr"
 	"github.com/nicoxiang/geektime-downloader/internal/geektime"
+	"github.com/nicoxiang/geektime-downloader/internal/pkg/logger"
 	"github.com/nicoxiang/geektime-downloader/internal/progress"
 	"github.com/nicoxiang/geektime-downloader/internal/service"
 )
@@ -34,6 +35,9 @@ type Worker struct {
 	exec           executor
 	clientProvider func() *geektime.Client
 	stability      Stability
+	stats          *Stats
+	startedAt      time.Time
+	lastActiveAt   atomic.Int64
 	pausedAuth     atomic.Bool
 	rateLimitUntil atomic.Int64 // unix nano when global rate-limit cooldown ends; 0 = none
 	cooldownStep   atomic.Int64
@@ -45,11 +49,11 @@ type Worker struct {
 }
 
 // NewWorker creates a job worker.
-func NewWorker(store *Store, exec executor, clientProvider func() *geektime.Client, st Stability) *Worker {
+func NewWorker(store *Store, exec executor, clientProvider func() *geektime.Client, st Stability, stats *Stats) *Worker {
 	return &Worker{
 		store: store, exec: exec, clientProvider: clientProvider,
-		stability: st,
-		notify:    make(chan struct{}, 1),
+		stability: st, stats: stats, startedAt: time.Now(),
+		notify: make(chan struct{}, 1),
 	}
 }
 
@@ -90,6 +94,58 @@ func (w *Worker) cooldownActive() bool {
 		return false
 	}
 	return time.Now().UnixNano() < until
+}
+
+// Stats returns a snapshot of terminal error counts, or nil when no stats collector is attached.
+func (w *Worker) Stats() map[string]int64 {
+	if w.stats == nil {
+		return nil
+	}
+	return w.stats.Snapshot()
+}
+
+// LastActiveAt returns the last time the worker touched activity, or the zero time if never.
+func (w *Worker) LastActiveAt() time.Time {
+	n := w.lastActiveAt.Load()
+	if n == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, n)
+}
+
+// Uptime returns the duration since the worker was created.
+func (w *Worker) Uptime() time.Duration {
+	return time.Since(w.startedAt)
+}
+
+// RateLimitUntil returns when the global rate-limit cooldown ends, or the zero time if none active.
+func (w *Worker) RateLimitUntil() time.Time {
+	n := w.rateLimitUntil.Load()
+	if n == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, n)
+}
+
+func (w *Worker) touchActive() {
+	w.lastActiveAt.Store(time.Now().UnixNano())
+}
+
+// recordTerminal logs and counts a terminal job error by apperr code.
+// Cancelled (user intent) is not logged/counted as an error.
+func (w *Worker) recordTerminal(jobID string, apiErr *apperr.APIError) {
+	if apiErr == nil || apiErr.Code == apperr.CodeCancelled {
+		return
+	}
+	switch apiErr.Code {
+	case apperr.CodeAuthExpired, apperr.CodeRateLimited, apperr.CodeTimeout:
+		logger.Warnf("job %s terminal: %s — %s", jobID, apiErr.Code, apiErr.Message)
+	default:
+		logger.Errorf(apiErr.Underlying, "job %s terminal: %s — %s", jobID, apiErr.Code, apiErr.Message)
+	}
+	if w.stats != nil {
+		w.stats.Inc(apiErr.Code)
+	}
 }
 
 // Start runs the worker loop until ctx is cancelled.
@@ -173,6 +229,7 @@ func (w *Worker) stabilityLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			w.touchActive()
 			hb := w.stability.HeartbeatTimeout
 			if hb <= 0 {
 				hb = 10 * time.Minute
@@ -232,13 +289,14 @@ func (w *Worker) runJob(parent context.Context, jobID string) {
 	}
 
 	course, folder, err := w.exec.ExecuteDownload(jobCtx, job.Request, reporter)
+	w.touchActive()
 	if err != nil {
+		apiErr := apperr.MapError(err)
+		w.recordTerminal(jobID, apiErr)
 		if errors.Is(err, context.DeadlineExceeded) {
-			apiErr := apperr.MapError(err)
 			_ = w.store.UpdateJobStatus(jobCtx, jobID, StatusFailed, "watchdog_timeout", apiErr)
 			return
 		}
-		apiErr := apperr.MapError(err)
 		switch apiErr.Code {
 		case apperr.CodeAuthExpired:
 			w.pausedAuth.Store(true)
