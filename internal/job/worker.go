@@ -205,6 +205,13 @@ func (r *storeReporter) OnArticleFailed(aid int, err error) {
 	_ = r.store.UpdateJobProgress(r.ctx, r.jobID, r.progress, "", "")
 }
 
+func (r *storeReporter) OnArticleProgress(aid, done, total int) {
+	if r.progress.CurrentArticle != nil && r.progress.CurrentArticle.AID == aid {
+		r.progress.CurrentArticle.Done = done
+		r.progress.CurrentArticle.Total = total
+	}
+}
+
 var _ progress.Reporter = (*storeReporter)(nil)
 
 // InitJobArticles seeds article rows after course lookup for progress tracking.

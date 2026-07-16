@@ -51,6 +51,8 @@ type CurrentArticle struct {
 	AID   int    `json:"aid"`
 	Title string `json:"title"`
 	Phase string `json:"phase"`
+	Done  int    `json:"done,omitempty"`
+	Total int    `json:"total,omitempty"`
 }
 
 // ArticleProgress tracks per-article status within a job.
