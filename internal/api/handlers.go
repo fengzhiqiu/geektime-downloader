@@ -4,10 +4,12 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/nicoxiang/geektime-downloader/internal/apperr"
 	"github.com/nicoxiang/geektime-downloader/internal/auth"
 	"github.com/nicoxiang/geektime-downloader/internal/job"
+	"github.com/nicoxiang/geektime-downloader/internal/pkg/logger"
 	"github.com/nicoxiang/geektime-downloader/internal/service"
 )
 
@@ -64,12 +66,22 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if activeJob != "" {
 		workerStatus = "busy"
 	}
+	staleCount, err := s.store.CountStaleJobs(r.Context())
+	if err != nil {
+		logger.Warnf("health: CountStaleJobs failed: %v", err)
+		staleCount = -1
+	}
 	writeOK(w, map[string]any{
-		"status":           "ok",
-		"version":          s.version,
-		"chrome_available": chromeAvailable(),
-		"worker_status":    workerStatus,
-		"active_job_id":    nilString(activeJob),
+		"status":                    "ok",
+		"version":                   s.version,
+		"chrome_available":          chromeAvailable(),
+		"worker_status":             workerStatus,
+		"active_job_id":             nilString(activeJob),
+		"uptime_seconds":            int64(s.worker.Uptime().Seconds()),
+		"last_active_at":            isoTimePtr(s.worker.LastActiveAt()),
+		"stale_jobs":                staleCount,
+		"error_counts":              s.worker.Stats(),
+		"rate_limit_cooldown_until": isoTimePtr(s.worker.RateLimitUntil()),
 	})
 }
 
@@ -194,6 +206,9 @@ func (s *Server) handleGetDownload(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeAPIError(w, err)
 		return
+	}
+	if j.Status == job.StatusRunning && j.StartedAt != nil {
+		j.RuntimeSeconds = int64(time.Since(*j.StartedAt).Seconds())
 	}
 	writeOK(w, j)
 }

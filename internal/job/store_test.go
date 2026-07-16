@@ -150,3 +150,33 @@ func TestResumeRateLimitJobs(t *testing.T) {
 		t.Fatalf("want pending, got %q", got.Status)
 	}
 }
+
+func TestCountStaleJobs(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	j, err := store.CreateJob(ctx, service.DownloadRequest{ProductType: "column", ProductID: 1, Mode: "all"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// running but NOT stale -> count 0
+	_ = store.UpdateJobStatus(ctx, j.ID, job.StatusRunning, "", nil)
+	n, err := store.CountStaleJobs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("want 0 stale, got %d", n)
+	}
+	// mark stale
+	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	if _, err := store.DB().ExecContext(ctx, `UPDATE jobs SET status_reason='stale_progress', updated_at=? WHERE id=?`, past, j.ID); err != nil {
+		t.Fatal(err)
+	}
+	n, err = store.CountStaleJobs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("want 1 stale, got %d", n)
+	}
+}

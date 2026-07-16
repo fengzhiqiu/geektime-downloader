@@ -6,6 +6,7 @@ package m3u8
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -74,7 +75,7 @@ func newTSPacket() *tsPacket {
 }
 
 // NewTSParser ...
-func NewTSParser(data []byte, key string) (*TSParser, error) {
+func NewTSParser(ctx context.Context, data []byte, key string) (*TSParser, error) {
 	hexKey, err := hex.DecodeString(key)
 	if err != nil {
 		return nil, fmt.Errorf("decode key hex failed: %w", err)
@@ -92,18 +93,21 @@ func NewTSParser(data []byte, key string) (*TSParser, error) {
 }
 
 // Decrypt decrypt video and audio PES
-func (p *TSParser) Decrypt() ([]byte, error) {
-	if err := p.decryptPES(p.stream.data, p.stream.videos, p.stream.key); err != nil {
+func (p *TSParser) Decrypt(ctx context.Context) ([]byte, error) {
+	if err := p.decryptPES(ctx, p.stream.data, p.stream.videos, p.stream.key); err != nil {
 		return nil, err
 	}
-	if err := p.decryptPES(p.stream.data, p.stream.audios, p.stream.key); err != nil {
+	if err := p.decryptPES(ctx, p.stream.data, p.stream.audios, p.stream.key); err != nil {
 		return nil, err
 	}
 	return p.stream.data, nil
 }
 
-func (p *TSParser) decryptPES(byteBuf []byte, pesFragments []*tsPesFragment, key []byte) error {
+func (p *TSParser) decryptPES(ctx context.Context, byteBuf []byte, pesFragments []*tsPesFragment, key []byte) error {
 	for _, pes := range pesFragments {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		buffer := &bytes.Buffer{}
 		for _, packet := range pes.packets {
 			if len(packet.payload) == 0 {

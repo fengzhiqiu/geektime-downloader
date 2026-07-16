@@ -234,6 +234,19 @@ func (s *Store) MarkStaleJobs(ctx context.Context, heartbeatTimeout time.Duratio
 	return err
 }
 
+// CountStaleJobs returns the number of running jobs flagged stale_progress.
+func (s *Store) CountStaleJobs(ctx context.Context) (int64, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT count(*) FROM jobs
+		WHERE status = ? AND status_reason = ?
+	`, StatusRunning, "stale_progress")
+	var n int64
+	if err := row.Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // ResumeRateLimitJobs moves waiting_rate_limit jobs back to pending after cooldown.
 func (s *Store) ResumeRateLimitJobs(ctx context.Context) (int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
