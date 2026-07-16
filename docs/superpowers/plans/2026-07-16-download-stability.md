@@ -553,12 +553,16 @@ func retry(ctx context.Context, attempts int, sleep time.Duration, f func() erro
 			logger.Infof("retry happen, times: %s", strconv.Itoa(i))
 		}
 		err = f()
-		if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		// context.Canceled = parent (job) cancelled → terminal, do not retry.
+		// Per-request DeadlineExceeded (segment timeout) IS retried (transient);
+		// the loop's ctx.Done() guard above prevents retrying when the parent
+		// job ctx itself has expired/cancelled.
+		if err == nil || errors.Is(err, context.Canceled) {
 			return err
 		}
 		var se *StatusError
 		if errors.As(err, &se) {
-			return err // server-side rejection: do not retry
+			return err // server-side rejection (4xx): do not retry
 		}
 	}
 	return fmt.Errorf("after %d attempts, last error: %s", attempts, err)
