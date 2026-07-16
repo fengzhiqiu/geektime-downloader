@@ -9,6 +9,7 @@ import (
 	"github.com/nicoxiang/geektime-downloader/internal/apperr"
 	"github.com/nicoxiang/geektime-downloader/internal/auth"
 	"github.com/nicoxiang/geektime-downloader/internal/job"
+	"github.com/nicoxiang/geektime-downloader/internal/pkg/logger"
 	"github.com/nicoxiang/geektime-downloader/internal/service"
 )
 
@@ -65,7 +66,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if activeJob != "" {
 		workerStatus = "busy"
 	}
-	staleCount, _ := s.store.CountStaleJobs(r.Context())
+	staleCount, err := s.store.CountStaleJobs(r.Context())
+	if err != nil {
+		logger.Warnf("health: CountStaleJobs failed: %v", err)
+		staleCount = -1
+	}
 	writeOK(w, map[string]any{
 		"status":                    "ok",
 		"version":                   s.version,

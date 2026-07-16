@@ -276,6 +276,7 @@ func (w *Worker) runJob(parent context.Context, jobID string) {
 			Code: apperr.CodeAuthExpired, Message: "session not configured",
 			Action: "UPDATE_COOKIES", Retryable: true, HTTPStatus: 401,
 		}
+		w.recordTerminal(jobID, apiErr)
 		w.pausedAuth.Store(true)
 		_ = w.store.UpdateJobStatus(jobCtx, jobID, StatusWaitingAuth, apiErr.Message, apiErr)
 		return
