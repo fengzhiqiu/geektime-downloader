@@ -210,7 +210,7 @@ func DownloadMP4(ctx context.Context, title, projectDir string, mp4URLs []string
 		headers[geektime.Origin] = geektime.DefaultBaseURL
 		headers[geektime.UserAgent] = geektime.DefaultUserAgent
 		logger.Infof("Begin download single article mp4 video, title: %s, mp4URL: %s", title, mp4URL)
-		_, err := downloader.DownloadFileConcurrently(ctx, dst, mp4URL, headers, 5)
+		_, err := downloader.DownloadFileConcurrently(ctx, dst, mp4URL, headers, 5, 0)
 		if err != nil {
 			logger.Errorf(err, "Failed to download single article mp4 video, title: %s, mp4URL: %s", title, mp4URL)
 			return nil
@@ -255,7 +255,7 @@ func download(ctx context.Context,
 		headers[geektime.Origin] = geektime.DefaultBaseURL
 		headers[geektime.UserAgent] = geektime.DefaultUserAgent
 
-		fileSize, err := downloader.DownloadFileConcurrently(ctx, dst, u, headers, concurrency)
+		fileSize, err := downloader.DownloadFileConcurrently(ctx, dst, u, headers, concurrency, 0)
 		if err != nil {
 			return err
 		}

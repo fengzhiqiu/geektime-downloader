@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"os"
 	"strconv"
@@ -23,24 +24,59 @@ type Part struct {
 	Offset int64
 }
 
+// StatusError is returned when a file download response is not 2xx,
+// so callers never mistake an error page for file content.
+type StatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("download responded status %d: %s", e.StatusCode, e.Body)
+}
+
+const defaultSegmentTimeout = 60 * time.Second
+
+var httpClient = &http.Client{
+	Transport: &http.Transport{
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		IdleConnTimeout:      90 * time.Second,
+	},
+}
+
+func segmentTimeoutOrDefault(d time.Duration) time.Duration {
+	if d <= 0 {
+		return defaultSegmentTimeout
+	}
+	return d
+}
+
 // DownloadFileConcurrently download file in chunks, return total file size
-func DownloadFileConcurrently(ctx context.Context, filepath string, url string, headers map[string]string, concurrency int) (int64, error) {
-	// Use HEAD with context so it can be cancelled by parent ctx (Ctrl+C)
-	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
+func DownloadFileConcurrently(ctx context.Context, filepath string, url string, headers map[string]string, concurrency int, segmentTimeout time.Duration) (int64, error) {
+	headCtx, headCancel := context.WithTimeout(ctx, segmentTimeoutOrDefault(segmentTimeout))
+	req, err := http.NewRequestWithContext(headCtx, "HEAD", url, nil)
 	if err != nil {
+		headCancel()
 		return 0, err
 	}
 	// propagate headers (if any)
 	for k, v := range headers {
 		req.Header.Add(k, v)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
+		headCancel()
 		return 0, err
 	}
-	if resp.Body != nil {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		_ = resp.Body.Close()
+		headCancel()
+		return 0, &StatusError{StatusCode: resp.StatusCode, Body: string(body)}
 	}
+	_ = resp.Body.Close()
+	headCancel()
 
 	fileSize, _ := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64)
 	if fileSize <= 0 {
@@ -70,7 +106,7 @@ func DownloadFileConcurrently(ctx context.Context, filepath string, url string, 
 	for i := 0; i < concurrency; i++ {
 		i := i
 		g.Go(func() error {
-			return download(ctx, concurrency, i, chunkSize, url, results)
+			return download(ctx, concurrency, i, chunkSize, url, headers, segmentTimeout, results)
 		})
 	}
 
@@ -131,7 +167,7 @@ func DownloadFileConcurrently(ctx context.Context, filepath string, url string, 
 	return fileSize, nil
 }
 
-func download(ctx context.Context, workers int, index int, chunkSize int64, url string, c chan Part) error {
+func download(ctx context.Context, workers int, index int, chunkSize int64, url string, headers map[string]string, segmentTimeout time.Duration, c chan Part) error {
 	// calculate offset by multiplying
 	// index with size
 	start := int64(index) * chunkSize
@@ -148,23 +184,29 @@ func download(ctx context.Context, workers int, index int, chunkSize int64, url 
 		dataRange = fmt.Sprintf("bytes=%d-", start)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return err
-	}
-
-	req.Header.Add("Range", dataRange)
-
-	// fix error: http2: server sent GOAWAY and closed the connection; LastStreamID=1999
-	// error comes from io read, not request
-	err = retry(ctx, 3, 700*time.Millisecond, func() error {
-		resp, err := http.DefaultClient.Do(req)
+	timeout := segmentTimeoutOrDefault(segmentTimeout)
+	err := retry(ctx, 3, 700*time.Millisecond, func() error {
+		rctx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		req, err := http.NewRequestWithContext(rctx, "GET", url, nil)
 		if err != nil {
 			return err
 		}
-		defer func() {
-			_ = resp.Body.Close()
-		}()
+		for k, v := range headers {
+			req.Header.Add(k, v)
+		}
+		req.Header.Add("Range", dataRange)
+		// fix error: http2: server sent GOAWAY and closed the connection; LastStreamID=1999
+		// error comes from io read, not request
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+			return &StatusError{StatusCode: resp.StatusCode, Body: string(body)}
+		}
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return err
@@ -172,29 +214,32 @@ func download(ctx context.Context, workers int, index int, chunkSize int64, url 
 		c <- Part{Index: index, Offset: start, Data: body}
 		return nil
 	})
-	if err != nil {
-		return err
-	}
-
 	return err
 }
 
 func retry(ctx context.Context, attempts int, sleep time.Duration, f func() error) (err error) {
 	for i := 0; i < attempts; i++ {
 		if i > 0 {
-			// backoff but allow cancellation
+			jitter := time.Duration(rand.Intn(int(sleep/5) + 1))
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(sleep):
+			case <-time.After(sleep + jitter):
 			}
-			sleep *= 2
-
-			logger.Infof("retry hanppen, times: %s", strconv.Itoa(i))
+			sleep = sleep * 2
+			logger.Infof("retry happen, times: %s", strconv.Itoa(i))
 		}
 		err = f()
+		// context.Canceled = parent (job) cancelled → terminal, do not retry.
+		// Per-request DeadlineExceeded (segment timeout) IS retried (transient);
+		// the loop's ctx.Done() guard above prevents retrying when the parent
+		// job ctx itself has expired/cancelled.
 		if err == nil || errors.Is(err, context.Canceled) {
 			return err
+		}
+		var se *StatusError
+		if errors.As(err, &se) {
+			return err // server-side rejection (4xx): do not retry
 		}
 	}
 	return fmt.Errorf("after %d attempts, last error: %s", attempts, err)
