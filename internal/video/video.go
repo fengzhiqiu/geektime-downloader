@@ -2,6 +2,7 @@ package video
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -213,7 +214,7 @@ func DownloadMP4(ctx context.Context, title, projectDir string, mp4URLs []string
 		_, err := downloader.DownloadFileConcurrently(ctx, dst, mp4URL, headers, 5, 0)
 		if err != nil {
 			logger.Errorf(err, "Failed to download single article mp4 video, title: %s, mp4URL: %s", title, mp4URL)
-			return nil
+			return translateDownloadErr(err)
 		}
 		logger.Infof("Finish download single article mp4 video, title: %s, mp4URL: %s", title, mp4URL)
 	}
@@ -257,7 +258,7 @@ func download(ctx context.Context,
 
 		fileSize, err := downloader.DownloadFileConcurrently(ctx, dst, u, headers, concurrency, 0)
 		if err != nil {
-			return err
+			return translateDownloadErr(err)
 		}
 
 		addBarValue(bar, fileSize)
@@ -361,10 +362,13 @@ func extractTSURLPrefix(m3u8url string) string {
 func getPlayInfo(client *geektime.Client, playInfoURL, quality string) (vod.PlayInfo, error) {
 	var getPlayInfoResp GetPlayInfoResponse
 	var playInfo vod.PlayInfo
-	_, err := client.RestyClient.R().
+	resp, err := client.RestyClient.R().
 		SetResult(&getPlayInfoResp).
 		Get(playInfoURL)
 	if err != nil {
+		return playInfo, err
+	}
+	if err := geektime.CheckStatus(resp); err != nil {
 		return playInfo, err
 	}
 
@@ -375,4 +379,22 @@ func getPlayInfo(client *geektime.Client, playInfoURL, quality string) (vod.Play
 		}
 	}
 	return playInfo, nil
+}
+
+// translateDownloadErr maps a downloader.StatusError (from CDN/VOD responses)
+// to geektime sentinel errors so the job state machine can react to auth/rate-limit.
+func translateDownloadErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	var se *downloader.StatusError
+	if errors.As(err, &se) {
+		switch se.StatusCode {
+		case 451:
+			return geektime.ErrGeekTimeRateLimit
+		case 452:
+			return geektime.ErrAuthFailed
+		}
+	}
+	return err
 }
