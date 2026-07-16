@@ -33,6 +33,7 @@ func newTestStoreTB(t *testing.T) *Store {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 

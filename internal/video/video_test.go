@@ -5,8 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -49,7 +47,6 @@ func TestGetPlayInfoNon200(t *testing.T) {
 	if err == nil {
 		t.Fatal("want error on non-200 getPlayInfo")
 	}
-	_, _ = os.Stat(filepath.Join(t.TempDir(), "x")) // keep imports used
 }
 
 type captureReporter struct {
