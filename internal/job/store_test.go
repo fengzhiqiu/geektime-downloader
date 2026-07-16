@@ -11,10 +11,12 @@ import (
 )
 
 func newTestStore(t *testing.T) *job.Store {
+	t.Helper()
 	s, err := job.OpenStore(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
