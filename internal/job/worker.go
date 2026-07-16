@@ -2,8 +2,10 @@ package job
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/nicoxiang/geektime-downloader/internal/apperr"
 	"github.com/nicoxiang/geektime-downloader/internal/geektime"
@@ -11,11 +13,27 @@ import (
 	"github.com/nicoxiang/geektime-downloader/internal/service"
 )
 
+// Stability holds watchdog / cooldown durations for the worker.
+type Stability struct {
+	JobTimeout        time.Duration
+	HeartbeatTimeout  time.Duration
+	RateLimitCooldown time.Duration
+}
+
+// executor decouples the worker from DownloadService for testability.
+// *service.DownloadService satisfies it; tests inject a fake.
+type executor interface {
+	SetClient(c *geektime.Client)
+	Client() *geektime.Client
+	ExecuteDownload(ctx context.Context, req service.DownloadRequest, reporter progress.Reporter) (geektime.Course, string, error)
+}
+
 // Worker executes download jobs sequentially.
 type Worker struct {
 	store          *Store
-	svc            *service.DownloadService
+	exec           executor
 	clientProvider func() *geektime.Client
+	stability      Stability
 	pausedAuth     atomic.Bool
 
 	mu          sync.Mutex
@@ -25,11 +43,19 @@ type Worker struct {
 }
 
 // NewWorker creates a job worker.
-func NewWorker(store *Store, svc *service.DownloadService, clientProvider func() *geektime.Client) *Worker {
+func NewWorker(store *Store, exec executor, clientProvider func() *geektime.Client, st Stability) *Worker {
 	return &Worker{
-		store: store, svc: svc, clientProvider: clientProvider,
-		notify: make(chan struct{}, 1),
+		store: store, exec: exec, clientProvider: clientProvider,
+		stability: st,
+		notify:    make(chan struct{}, 1),
 	}
+}
+
+func (w *Worker) jobTimeoutOrDefault() time.Duration {
+	if w.stability.JobTimeout > 0 {
+		return w.stability.JobTimeout
+	}
+	return 60 * time.Minute
 }
 
 // Start runs the worker loop until ctx is cancelled.
@@ -96,7 +122,7 @@ func (w *Worker) loop(ctx context.Context) {
 }
 
 func (w *Worker) runJob(parent context.Context, jobID string) {
-	jobCtx, cancel := context.WithCancel(parent)
+	jobCtx, cancel := context.WithTimeout(parent, w.jobTimeoutOrDefault())
 	w.mu.Lock()
 	w.activeJobID = jobID
 	w.cancel = cancel
@@ -116,9 +142,9 @@ func (w *Worker) runJob(parent context.Context, jobID string) {
 	_ = w.store.UpdateJobStatus(jobCtx, jobID, StatusRunning, "", nil)
 
 	if w.clientProvider != nil {
-		w.svc.SetClient(w.clientProvider())
+		w.exec.SetClient(w.clientProvider())
 	}
-	if w.svc.Client() == nil {
+	if w.exec.Client() == nil {
 		apiErr := &apperr.APIError{
 			Code: apperr.CodeAuthExpired, Message: "session not configured",
 			Action: "UPDATE_COOKIES", Retryable: true, HTTPStatus: 401,
@@ -135,8 +161,13 @@ func (w *Worker) runJob(parent context.Context, jobID string) {
 		titles: map[int]string{},
 	}
 
-	course, folder, err := w.svc.ExecuteDownload(jobCtx, job.Request, reporter)
+	course, folder, err := w.exec.ExecuteDownload(jobCtx, job.Request, reporter)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			apiErr := apperr.MapError(err)
+			_ = w.store.UpdateJobStatus(jobCtx, jobID, StatusFailed, "watchdog_timeout", apiErr)
+			return
+		}
 		apiErr := apperr.MapError(err)
 		switch apiErr.Code {
 		case apperr.CodeAuthExpired:

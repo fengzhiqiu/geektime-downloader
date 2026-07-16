@@ -60,7 +60,11 @@ var serveCmd = &cobra.Command{
 		}
 
 		dlSvc := service.NewDownloadService(&cfg, authMgr.GetClient())
-		worker := job.NewWorker(store, dlSvc, authMgr.GetClient)
+		worker := job.NewWorker(store, dlSvc, authMgr.GetClient, job.Stability{
+			JobTimeout:        cfg.JobTimeout,
+			HeartbeatTimeout:  cfg.HeartbeatTimeout,
+			RateLimitCooldown: cfg.RateLimitCooldown,
+		})
 		worker.Start(cmd.Context())
 
 		srv := api.NewServer(authMgr, store, worker, dlSvc, "dev", serveCfg.apiKey, worker.OnCookiesUpdated)
