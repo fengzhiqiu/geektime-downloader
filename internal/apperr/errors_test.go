@@ -42,3 +42,17 @@ func TestMapErrorPassthrough(t *testing.T) {
 		t.Fatal("expected passthrough")
 	}
 }
+
+func TestMapErrorDeadlineExceeded(t *testing.T) {
+	err := context.DeadlineExceeded
+	apiErr := apperr.MapError(err)
+	if apiErr.Code != apperr.CodeTimeout {
+		t.Fatalf("want CodeTimeout, got %s", apiErr.Code)
+	}
+	if !apiErr.Retryable {
+		t.Fatal("DeadlineExceeded should be retryable")
+	}
+	if apiErr.HTTPStatus != 504 {
+		t.Fatalf("want 504, got %d", apiErr.HTTPStatus)
+	}
+}
