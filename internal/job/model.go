@@ -35,6 +35,7 @@ type Job struct {
 	UpdatedAt       time.Time              `json:"updated_at"`
 	StartedAt       *time.Time             `json:"started_at,omitempty"`
 	FinishedAt      *time.Time             `json:"finished_at,omitempty"`
+	RuntimeSeconds  int64                  `json:"runtime_seconds,omitempty"`
 }
 
 // Progress summarizes job-level download progress.

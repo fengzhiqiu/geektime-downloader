@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/nicoxiang/geektime-downloader/internal/apperr"
 )
@@ -83,4 +84,12 @@ func chromeAvailable() bool {
 		}
 	}
 	return false
+}
+
+// isoTimePtr returns an RFC3339 string for non-zero t, or JSON null for zero.
+func isoTimePtr(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t.UTC().Format(time.RFC3339)
 }
