@@ -35,6 +35,8 @@ type Worker struct {
 	clientProvider func() *geektime.Client
 	stability      Stability
 	pausedAuth     atomic.Bool
+	rateLimitUntil atomic.Int64 // unix nano when global rate-limit cooldown ends; 0 = none
+	cooldownStep   atomic.Int64
 
 	mu          sync.Mutex
 	activeJobID string
@@ -58,9 +60,42 @@ func (w *Worker) jobTimeoutOrDefault() time.Duration {
 	return 60 * time.Minute
 }
 
+const rateLimitCooldownCap = 30 * time.Minute
+
+func (w *Worker) rateLimitCooldownOrDefault() time.Duration {
+	if w.stability.RateLimitCooldown > 0 {
+		return w.stability.RateLimitCooldown
+	}
+	return 120 * time.Second
+}
+
+func (w *Worker) applyRateLimitCooldown() {
+	step := w.cooldownStep.Load()
+	base := int64(w.rateLimitCooldownOrDefault())
+	shift := step
+	if shift > 2 {
+		shift = 2 // cap at 4x (120s->240s->480s)
+	}
+	cooldown := base << shift
+	if cooldown > int64(rateLimitCooldownCap) {
+		cooldown = int64(rateLimitCooldownCap)
+	}
+	w.rateLimitUntil.Store(time.Now().UnixNano() + cooldown)
+	w.cooldownStep.Add(1)
+}
+
+func (w *Worker) cooldownActive() bool {
+	until := w.rateLimitUntil.Load()
+	if until == 0 {
+		return false
+	}
+	return time.Now().UnixNano() < until
+}
+
 // Start runs the worker loop until ctx is cancelled.
 func (w *Worker) Start(ctx context.Context) {
 	go w.loop(ctx)
+	go w.stabilityLoop(ctx)
 }
 
 // Enqueue notifies the worker that a new job is available.
@@ -108,6 +143,15 @@ func (w *Worker) loop(ctx context.Context) {
 			}
 			continue
 		}
+		if w.cooldownActive() {
+			residue := time.Until(time.Unix(0, w.rateLimitUntil.Load()))
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(residue):
+			}
+			continue
+		}
 		jobID, err := w.store.NextPendingJob(ctx)
 		if err != nil || jobID == "" {
 			select {
@@ -118,6 +162,32 @@ func (w *Worker) loop(ctx context.Context) {
 			continue
 		}
 		w.runJob(ctx, jobID)
+	}
+}
+
+func (w *Worker) stabilityLoop(ctx context.Context) {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			hb := w.stability.HeartbeatTimeout
+			if hb <= 0 {
+				hb = 10 * time.Minute
+			}
+			_ = w.store.MarkStaleJobs(ctx, hb)
+			if w.rateLimitUntil.Load() != 0 && !w.cooldownActive() {
+				if _, err := w.store.ResumeRateLimitJobs(ctx); err == nil {
+					w.rateLimitUntil.Store(0)
+					if step := w.cooldownStep.Load(); step > 0 {
+						w.cooldownStep.Store(step / 2)
+					}
+					w.Enqueue()
+				}
+			}
+		}
 	}
 }
 
@@ -174,6 +244,7 @@ func (w *Worker) runJob(parent context.Context, jobID string) {
 			w.pausedAuth.Store(true)
 			_ = w.store.UpdateJobStatus(jobCtx, jobID, StatusWaitingAuth, apiErr.Message, apiErr)
 		case apperr.CodeRateLimited:
+			w.applyRateLimitCooldown()
 			_ = w.store.UpdateJobStatus(jobCtx, jobID, StatusWaitingRateLimit, apiErr.Message, apiErr)
 		case apperr.CodeCancelled:
 			_ = w.store.UpdateJobStatus(jobCtx, jobID, StatusCancelled, apiErr.Message, apiErr)
@@ -237,10 +308,12 @@ func (r *storeReporter) OnArticleFailed(aid int, err error) {
 }
 
 func (r *storeReporter) OnArticleProgress(aid, done, total int) {
-	if r.progress.CurrentArticle != nil && r.progress.CurrentArticle.AID == aid {
-		r.progress.CurrentArticle.Done = done
-		r.progress.CurrentArticle.Total = total
+	if r.progress.CurrentArticle == nil || r.progress.CurrentArticle.AID != aid {
+		r.progress.CurrentArticle = &CurrentArticle{AID: aid, Phase: "downloading_video"}
 	}
+	r.progress.CurrentArticle.Done = done
+	r.progress.CurrentArticle.Total = total
+	_ = r.store.UpdateJobProgress(r.ctx, r.jobID, r.progress, "", "")
 }
 
 var _ progress.Reporter = (*storeReporter)(nil)

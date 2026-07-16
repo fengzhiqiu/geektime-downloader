@@ -60,3 +60,40 @@ func TestRunJobWatchdogTimeout(t *testing.T) {
 		t.Fatalf("want TIMEOUT error, got %+v", got.Error)
 	}
 }
+
+func TestRateLimitCooldownGate(t *testing.T) {
+	store := newTestStoreTB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := NewWorker(store, &fakeExecutor{err: nil}, nil, Stability{
+		JobTimeout: time.Minute, HeartbeatTimeout: time.Minute, RateLimitCooldown: 200 * time.Millisecond,
+	})
+	w.Start(ctx)
+
+	// 模拟一次限流：置冷却到 200ms 后
+	w.applyRateLimitCooldown()
+	if w.rateLimitUntil.Load() == 0 {
+		t.Fatal("rateLimitUntil should be set")
+	}
+	if !w.cooldownActive() {
+		t.Fatal("cooldown should be active immediately after rate limit")
+	}
+
+	// 等冷却过期
+	time.Sleep(300 * time.Millisecond)
+	if w.cooldownActive() {
+		t.Fatal("cooldown should have expired")
+	}
+}
+
+func TestRateLimitCooldownGrows(t *testing.T) {
+	store := newTestStoreTB(t)
+	w := NewWorker(store, &fakeExecutor{}, nil, Stability{RateLimitCooldown: 100 * time.Millisecond})
+	w.applyRateLimitCooldown()
+	first := w.rateLimitUntil.Load()
+	w.applyRateLimitCooldown()
+	second := w.rateLimitUntil.Load()
+	if second-first < int64(100*time.Millisecond) {
+		t.Fatal("cooldown should grow on repeated rate limits")
+	}
+}
