@@ -173,7 +173,7 @@ func (d *CourseDownloader) DownloadSingleVideoProduct(title string, articleID in
 	if err != nil {
 		return err
 	}
-	return video.DownloadArticleVideo(d.ctx, d.geektimeClient, articleID, sourceType, columnDir, d.cfg.Quality, d.concurrency)
+	return video.DownloadArticleVideo(d.ctx, d.geektimeClient, articleID, sourceType, columnDir, d.cfg.Quality, d.concurrency, d.cfg.SegmentTimeout, d.progressReporter)
 }
 
 func increaseDownloadedTextArticleCount(total int, downloaded *int) {
@@ -230,7 +230,7 @@ func (d *CourseDownloader) downloadTextArticle(article geektime.Article, columnD
 
 	hasVideo, videoURL := getVideoURLFromArticleContent(articleInfo.Data.ArticleContent)
 	if hasVideo && videoURL != "" {
-		if err := video.DownloadMP4(d.ctx, article.Title, columnDir, []string{videoURL}, overwrite); err != nil {
+		if err := video.DownloadMP4(d.ctx, article.Title, columnDir, []string{videoURL}, overwrite, d.cfg.SegmentTimeout); err != nil {
 			return err
 		}
 	}
@@ -240,7 +240,7 @@ func (d *CourseDownloader) downloadTextArticle(article geektime.Article, columnD
 		for i, v := range articleInfo.Data.InlineVideoSubtitles {
 			videoURLs[i] = v.VideoURL
 		}
-		if err := video.DownloadMP4(d.ctx, article.Title, columnDir, videoURLs, overwrite); err != nil {
+		if err := video.DownloadMP4(d.ctx, article.Title, columnDir, videoURLs, overwrite, d.cfg.SegmentTimeout); err != nil {
 			return err
 		}
 	}
@@ -302,11 +302,11 @@ func (d *CourseDownloader) downloadVideoArticle(course geektime.Course, productT
 	}
 
 	if productType.IsUniversity() {
-		err = video.DownloadUniversityVideo(d.ctx, d.geektimeClient, article.AID, course, dir, d.cfg.Quality, d.concurrency)
+		err = video.DownloadUniversityVideo(d.ctx, d.geektimeClient, article.AID, course, dir, d.cfg.Quality, d.concurrency, d.cfg.SegmentTimeout, d.progressReporter)
 	} else if d.cfg.IsEnterprise {
-		err = video.DownloadEnterpriseArticleVideo(d.ctx, d.geektimeClient, article.AID, dir, d.cfg.Quality, d.concurrency)
+		err = video.DownloadEnterpriseArticleVideo(d.ctx, d.geektimeClient, article.AID, dir, d.cfg.Quality, d.concurrency, d.cfg.SegmentTimeout, d.progressReporter)
 	} else {
-		err = video.DownloadArticleVideo(d.ctx, d.geektimeClient, article.AID, productType.SourceType, dir, d.cfg.Quality, d.concurrency)
+		err = video.DownloadArticleVideo(d.ctx, d.geektimeClient, article.AID, productType.SourceType, dir, d.cfg.Quality, d.concurrency, d.cfg.SegmentTimeout, d.progressReporter)
 	}
 	return err
 }
@@ -368,10 +368,19 @@ func getVideoURLFromArticleContent(content string) (hasVideo bool, videoURL stri
 	return hasVideo, videoURL
 }
 
-// waitRandomTime wait interval seconds of time plus a 2000ms max jitter
+// waitRandomTime waits interval seconds plus a 1x interval jitter window.
 func (d *CourseDownloader) waitRandomTime() {
-	randomMillis := d.cfg.Interval*1000 + d.waitRand.Intn(2000)
-	time.Sleep(time.Duration(randomMillis) * time.Millisecond)
+	time.Sleep(time.Duration(jitterMillis(d.cfg.Interval, d.waitRand)) * time.Millisecond)
+}
+
+// jitterMillis returns a sleep window in milliseconds of [interval*1000, interval*1000*2).
+// When interval <= 0, a 1s base is used so requests are still spaced.
+func jitterMillis(interval int, rnd *rand.Rand) int {
+	base := interval * 1000
+	if base <= 0 {
+		base = 1000
+	}
+	return base + rnd.Intn(base)
 }
 
 func (d *CourseDownloader) reportStart(aid int, title, phase string) {

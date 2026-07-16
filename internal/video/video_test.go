@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/nicoxiang/geektime-downloader/internal/geektime"
 	"github.com/nicoxiang/geektime-downloader/internal/pkg/downloader"
@@ -32,7 +33,7 @@ func TestDownloadMP4ReturnsErrorOn403(t *testing.T) {
 	}))
 	defer srv.Close()
 	dir := t.TempDir()
-	err := DownloadMP4(context.Background(), "t", dir, []string{srv.URL + "/v.mp4"}, false)
+	err := DownloadMP4(context.Background(), "t", dir, []string{srv.URL + "/v.mp4"}, false, time.Second)
 	if err == nil {
 		t.Fatal("want error on 403, got nil")
 	}
@@ -49,4 +50,54 @@ func TestGetPlayInfoNon200(t *testing.T) {
 		t.Fatal("want error on non-200 getPlayInfo")
 	}
 	_, _ = os.Stat(filepath.Join(t.TempDir(), "x")) // keep imports used
+}
+
+type captureReporter struct {
+	progresses []progressEvent
+}
+
+type progressEvent struct{ aid, done, total int }
+
+func (c *captureReporter) OnArticleStart(int, string, string)   {}
+func (c *captureReporter) OnArticleComplete(int, []string)     {}
+func (c *captureReporter) OnArticleSkipped(int, string)        {}
+func (c *captureReporter) OnArticleFailed(int, error)          {}
+func (c *captureReporter) OnArticleProgress(aid, done, total int) {
+	c.progresses = append(c.progresses, progressEvent{aid, done, total})
+}
+
+func TestDownloadReportsPerSegmentProgress(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ts"))
+	}))
+	defer srv.Close()
+
+	tsFileNames := []string{"seg0.ts", "seg1.ts"}
+	dir := t.TempDir()
+	rep := &captureReporter{}
+	err := download(
+		context.Background(),
+		srv.URL+"/",
+		"per-seg-title",
+		dir,
+		tsFileNames,
+		nil,
+		int64(len(tsFileNames)),
+		false, // isVodEncryptVideo
+		1,    // concurrency
+		time.Second,
+		42, // articleID
+		rep,
+	)
+	if err != nil {
+		t.Fatalf("download failed: %v", err)
+	}
+	if len(rep.progresses) != 2 {
+		t.Fatalf("want 2 progress events, got %d", len(rep.progresses))
+	}
+	for i, ev := range rep.progresses {
+		if ev.aid != 42 || ev.done != i+1 || ev.total != 2 {
+			t.Fatalf("event %d = %+v, want aid=42 done=%d total=2", i, ev, i+1)
+		}
+	}
 }
