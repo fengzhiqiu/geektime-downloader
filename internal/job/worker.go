@@ -2,8 +2,10 @@ package job
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/nicoxiang/geektime-downloader/internal/apperr"
 	"github.com/nicoxiang/geektime-downloader/internal/geektime"
@@ -11,12 +13,30 @@ import (
 	"github.com/nicoxiang/geektime-downloader/internal/service"
 )
 
+// Stability holds watchdog / cooldown durations for the worker.
+type Stability struct {
+	JobTimeout        time.Duration
+	HeartbeatTimeout  time.Duration
+	RateLimitCooldown time.Duration
+}
+
+// executor decouples the worker from DownloadService for testability.
+// *service.DownloadService satisfies it; tests inject a fake.
+type executor interface {
+	SetClient(c *geektime.Client)
+	Client() *geektime.Client
+	ExecuteDownload(ctx context.Context, req service.DownloadRequest, reporter progress.Reporter) (geektime.Course, string, error)
+}
+
 // Worker executes download jobs sequentially.
 type Worker struct {
 	store          *Store
-	svc            *service.DownloadService
+	exec           executor
 	clientProvider func() *geektime.Client
+	stability      Stability
 	pausedAuth     atomic.Bool
+	rateLimitUntil atomic.Int64 // unix nano when global rate-limit cooldown ends; 0 = none
+	cooldownStep   atomic.Int64
 
 	mu          sync.Mutex
 	activeJobID string
@@ -25,16 +45,57 @@ type Worker struct {
 }
 
 // NewWorker creates a job worker.
-func NewWorker(store *Store, svc *service.DownloadService, clientProvider func() *geektime.Client) *Worker {
+func NewWorker(store *Store, exec executor, clientProvider func() *geektime.Client, st Stability) *Worker {
 	return &Worker{
-		store: store, svc: svc, clientProvider: clientProvider,
-		notify: make(chan struct{}, 1),
+		store: store, exec: exec, clientProvider: clientProvider,
+		stability: st,
+		notify:    make(chan struct{}, 1),
 	}
+}
+
+func (w *Worker) jobTimeoutOrDefault() time.Duration {
+	if w.stability.JobTimeout > 0 {
+		return w.stability.JobTimeout
+	}
+	return 60 * time.Minute
+}
+
+const rateLimitCooldownCap = 30 * time.Minute
+
+func (w *Worker) rateLimitCooldownOrDefault() time.Duration {
+	if w.stability.RateLimitCooldown > 0 {
+		return w.stability.RateLimitCooldown
+	}
+	return 120 * time.Second
+}
+
+func (w *Worker) applyRateLimitCooldown() {
+	step := w.cooldownStep.Load()
+	base := int64(w.rateLimitCooldownOrDefault())
+	shift := step
+	if shift > 2 {
+		shift = 2 // cap at 4x (120s->240s->480s)
+	}
+	cooldown := base << shift
+	if cooldown > int64(rateLimitCooldownCap) {
+		cooldown = int64(rateLimitCooldownCap)
+	}
+	w.rateLimitUntil.Store(time.Now().UnixNano() + cooldown)
+	w.cooldownStep.Add(1)
+}
+
+func (w *Worker) cooldownActive() bool {
+	until := w.rateLimitUntil.Load()
+	if until == 0 {
+		return false
+	}
+	return time.Now().UnixNano() < until
 }
 
 // Start runs the worker loop until ctx is cancelled.
 func (w *Worker) Start(ctx context.Context) {
 	go w.loop(ctx)
+	go w.stabilityLoop(ctx)
 }
 
 // Enqueue notifies the worker that a new job is available.
@@ -82,6 +143,15 @@ func (w *Worker) loop(ctx context.Context) {
 			}
 			continue
 		}
+		if w.cooldownActive() {
+			residue := time.Until(time.Unix(0, w.rateLimitUntil.Load()))
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(residue):
+			}
+			continue
+		}
 		jobID, err := w.store.NextPendingJob(ctx)
 		if err != nil || jobID == "" {
 			select {
@@ -95,8 +165,34 @@ func (w *Worker) loop(ctx context.Context) {
 	}
 }
 
+func (w *Worker) stabilityLoop(ctx context.Context) {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			hb := w.stability.HeartbeatTimeout
+			if hb <= 0 {
+				hb = 10 * time.Minute
+			}
+			_ = w.store.MarkStaleJobs(ctx, hb)
+			if w.rateLimitUntil.Load() != 0 && !w.cooldownActive() {
+				if _, err := w.store.ResumeRateLimitJobs(ctx); err == nil {
+					w.rateLimitUntil.Store(0)
+					if step := w.cooldownStep.Load(); step > 0 {
+						w.cooldownStep.Store(step / 2)
+					}
+					w.Enqueue()
+				}
+			}
+		}
+	}
+}
+
 func (w *Worker) runJob(parent context.Context, jobID string) {
-	jobCtx, cancel := context.WithCancel(parent)
+	jobCtx, cancel := context.WithTimeout(parent, w.jobTimeoutOrDefault())
 	w.mu.Lock()
 	w.activeJobID = jobID
 	w.cancel = cancel
@@ -116,9 +212,9 @@ func (w *Worker) runJob(parent context.Context, jobID string) {
 	_ = w.store.UpdateJobStatus(jobCtx, jobID, StatusRunning, "", nil)
 
 	if w.clientProvider != nil {
-		w.svc.SetClient(w.clientProvider())
+		w.exec.SetClient(w.clientProvider())
 	}
-	if w.svc.Client() == nil {
+	if w.exec.Client() == nil {
 		apiErr := &apperr.APIError{
 			Code: apperr.CodeAuthExpired, Message: "session not configured",
 			Action: "UPDATE_COOKIES", Retryable: true, HTTPStatus: 401,
@@ -135,14 +231,20 @@ func (w *Worker) runJob(parent context.Context, jobID string) {
 		titles: map[int]string{},
 	}
 
-	course, folder, err := w.svc.ExecuteDownload(jobCtx, job.Request, reporter)
+	course, folder, err := w.exec.ExecuteDownload(jobCtx, job.Request, reporter)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			apiErr := apperr.MapError(err)
+			_ = w.store.UpdateJobStatus(jobCtx, jobID, StatusFailed, "watchdog_timeout", apiErr)
+			return
+		}
 		apiErr := apperr.MapError(err)
 		switch apiErr.Code {
 		case apperr.CodeAuthExpired:
 			w.pausedAuth.Store(true)
 			_ = w.store.UpdateJobStatus(jobCtx, jobID, StatusWaitingAuth, apiErr.Message, apiErr)
 		case apperr.CodeRateLimited:
+			w.applyRateLimitCooldown()
 			_ = w.store.UpdateJobStatus(jobCtx, jobID, StatusWaitingRateLimit, apiErr.Message, apiErr)
 		case apperr.CodeCancelled:
 			_ = w.store.UpdateJobStatus(jobCtx, jobID, StatusCancelled, apiErr.Message, apiErr)
@@ -202,6 +304,15 @@ func (r *storeReporter) OnArticleFailed(aid int, err error) {
 	_ = r.store.UpsertArticleProgress(r.ctx, r.jobID, ArticleProgress{
 		AID: aid, Title: title, Status: StatusFailed, Error: apiErr,
 	})
+	_ = r.store.UpdateJobProgress(r.ctx, r.jobID, r.progress, "", "")
+}
+
+func (r *storeReporter) OnArticleProgress(aid, done, total int) {
+	if r.progress.CurrentArticle == nil || r.progress.CurrentArticle.AID != aid {
+		r.progress.CurrentArticle = &CurrentArticle{AID: aid, Phase: "downloading_video"}
+	}
+	r.progress.CurrentArticle.Done = done
+	r.progress.CurrentArticle.Total = total
 	_ = r.store.UpdateJobProgress(r.ctx, r.jobID, r.progress, "", "")
 }
 

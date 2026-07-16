@@ -222,6 +222,32 @@ func (s *Store) ResumeWaitingAuthJobs(ctx context.Context) ([]string, error) {
 	return ids, err
 }
 
+// MarkStaleJobs flags running jobs whose progress has not updated within
+// heartbeatTimeout as stale_progress (status stays running). Does not force-end.
+func (s *Store) MarkStaleJobs(ctx context.Context, heartbeatTimeout time.Duration) error {
+	cutoff := time.Now().UTC().Add(-heartbeatTimeout).Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE jobs SET status_reason = ?, updated_at = ?
+		WHERE status = ? AND updated_at < ? AND status_reason = ''
+	`, "stale_progress", now, StatusRunning, cutoff)
+	return err
+}
+
+// ResumeRateLimitJobs moves waiting_rate_limit jobs back to pending after cooldown.
+func (s *Store) ResumeRateLimitJobs(ctx context.Context) (int64, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE jobs SET status = ?, status_reason = '', error_json = '', updated_at = ?
+		WHERE status = ?
+	`, StatusPending, now, StatusWaitingRateLimit)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // UpdateJobStatus updates job status and optional error.
 func (s *Store) UpdateJobStatus(ctx context.Context, id, status, reason string, apiErr *apperr.APIError) error {
 	now := time.Now().UTC().Format(time.RFC3339)

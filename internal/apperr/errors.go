@@ -92,6 +92,11 @@ func MapError(err error) *APIError {
 			Code: CodeCancelled, Message: "任务已取消",
 			Action: "NONE", Retryable: false, HTTPStatus: 409, Underlying: err,
 		}
+	case errors.Is(err, context.DeadlineExceeded):
+		return &APIError{
+			Code: CodeTimeout, Message: "任务执行超时（看门狗触发）",
+			Action: "RETRY", Retryable: true, HTTPStatus: 504, Underlying: err,
+		}
 	default:
 		if os.IsTimeout(err) {
 			return &APIError{

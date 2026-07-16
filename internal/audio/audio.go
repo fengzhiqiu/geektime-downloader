@@ -28,7 +28,7 @@ func DownloadAudio(ctx context.Context, downloadAudioURL, dir, title string) err
 	headers[geektime.Origin] = geektime.DefaultBaseURL
 	headers[geektime.UserAgent] = geektime.DefaultUserAgent
 
-	_, err := downloader.DownloadFileConcurrently(ctx, audioFileName, downloadAudioURL, headers, 1)
+	_, err := downloader.DownloadFileConcurrently(ctx, audioFileName, downloadAudioURL, headers, 1, 0)
 	if err != nil {
 		logger.Errorf(err, "Failed to download article audio, title: %s", title)
 		_ = os.Remove(audioFileName)

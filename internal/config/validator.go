@@ -110,6 +110,22 @@ func validateTiming(cfg *AppConfig) error {
 	return nil
 }
 
+func validateStability(cfg *AppConfig) error {
+	if cfg.JobTimeout <= 0 {
+		return fmt.Errorf("argument 'job-timeout' must be greater than 0")
+	}
+	if cfg.HeartbeatTimeout <= 0 {
+		return fmt.Errorf("argument 'heartbeat-timeout' must be greater than 0")
+	}
+	if cfg.RateLimitCooldown <= 0 {
+		return fmt.Errorf("argument 'rate-limit-cooldown' must be greater than 0")
+	}
+	if cfg.SegmentTimeout <= 0 {
+		return fmt.Errorf("argument 'segment-timeout' must be greater than 0")
+	}
+	return nil
+}
+
 // ValidateServeConfig validates configuration for the API server mode.
 // Cookies are optional at startup and can be set via the session API.
 func ValidateServeConfig(cfg *AppConfig) error {
@@ -126,6 +142,9 @@ func ValidateServeConfig(cfg *AppConfig) error {
 		return err
 	}
 	if err := validateTiming(cfg); err != nil {
+		return err
+	}
+	if err := validateStability(cfg); err != nil {
 		return err
 	}
 	return nil

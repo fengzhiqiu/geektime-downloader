@@ -83,6 +83,27 @@ func (c *Client) newRequest(
 	return r
 }
 
+// CheckStatus maps a non-2xx response to a sentinel error. Returns nil for 2xx.
+// Shared by do() (geektime APIs) and video.getPlayInfo (VOD URL).
+func CheckStatus(resp *resty.Response) error {
+	statusCode := resp.RawResponse.StatusCode
+	if statusCode >= 200 && statusCode < 300 {
+		return nil
+	}
+	logNotOkResponse(resp)
+	switch statusCode {
+	case 451:
+		return ErrGeekTimeRateLimit
+	case 452:
+		return ErrAuthFailed
+	default:
+		return ErrGeekTimeAPIBadCode{
+			Path:           resp.RawResponse.Request.URL.String(),
+			ResponseString: resp.String(),
+		}
+	}
+}
+
 // do perform http request
 func do(request *resty.Request) (*resty.Response, error) {
 	logger.Infof("Http request start, method: %s, url: %s, request body: %v",
@@ -95,22 +116,14 @@ func do(request *resty.Request) (*resty.Response, error) {
 		return nil, err
 	}
 
-	statusCode := resp.RawResponse.StatusCode
-
 	logger.Infof("Http request end, method: %s, url: %s, status code: %d",
 		resp.RawResponse.Request.Method,
 		resp.RawResponse.Request.URL,
 		resp.RawResponse.StatusCode,
 	)
 
-	if statusCode != 200 {
-		logNotOkResponse(resp)
-		switch statusCode {
-		case 451:
-			return nil, ErrGeekTimeRateLimit
-		case 452:
-			return nil, ErrAuthFailed
-		}
+	if err := CheckStatus(resp); err != nil {
+		return nil, err
 	}
 
 	rv := reflect.ValueOf(request.Result)
