@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -96,5 +98,26 @@ func TestDownloadReportsPerSegmentProgress(t *testing.T) {
 		if ev.aid != 42 || ev.done != i+1 || ev.total != 2 {
 			t.Fatalf("event %d = %+v, want aid=42 done=%d total=2", i, ev, i+1)
 		}
+	}
+}
+
+func TestMergeTSFilesCtxCancelled(t *testing.T) {
+	tempDir := t.TempDir()
+	// 2 small fake ts files (non-encrypted path, no decrypt)
+	for _, n := range []string{"a.ts", "b.ts"} {
+		if err := os.WriteFile(filepath.Join(tempDir, n), []byte("x"), 0o666); err != nil {
+			t.Fatal(err)
+		}
+	}
+	projectDir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := mergeTSFiles(ctx, tempDir, "title", projectDir, nil, false)
+	if err == nil {
+		t.Fatal("want ctx.Err() from cancelled ctx, got nil")
+	}
+	// final video file must not be left behind on error
+	if _, statErr := os.Stat(filepath.Join(projectDir, "title.ts")); statErr == nil {
+		t.Fatal("final video file should be removed on ctx error")
 	}
 }

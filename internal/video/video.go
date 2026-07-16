@@ -290,12 +290,12 @@ func download(ctx context.Context,
 	}
 
 	// Read temp ts files, decrypt and merge into the one final video file
-	err = mergeTSFiles(tempVideoDir, filenamifyTitle, projectDir, decryptKey, isVodEncryptVideo)
+	err = mergeTSFiles(ctx, tempVideoDir, filenamifyTitle, projectDir, decryptKey, isVodEncryptVideo)
 
 	return
 }
 
-func mergeTSFiles(tempVideoDir, filenamifyTitle, projectDir string, key []byte, isVodEncryptVideo bool) error {
+func mergeTSFiles(ctx context.Context, tempVideoDir, filenamifyTitle, projectDir string, key []byte, isVodEncryptVideo bool) error {
 	tempTSFiles, err := os.ReadDir(tempVideoDir)
 	if err != nil {
 		return err
@@ -313,6 +313,10 @@ func mergeTSFiles(tempVideoDir, filenamifyTitle, projectDir string, key []byte, 
 		}
 	}()
 	for _, tempTSFile := range tempTSFiles {
+		if err := ctx.Err(); err != nil {
+			removeOnError = true
+			return err
+		}
 		f, err := os.ReadFile(filepath.Join(tempVideoDir, tempTSFile.Name()))
 		if err != nil {
 			removeOnError = true
@@ -320,12 +324,12 @@ func mergeTSFiles(tempVideoDir, filenamifyTitle, projectDir string, key []byte, 
 		}
 
 		if isVodEncryptVideo {
-			tsParser, err := m3u8.NewTSParser(f, string(key))
+			tsParser, err := m3u8.NewTSParser(ctx, f, string(key))
 			if err != nil {
 				removeOnError = true
 				return err
 			}
-			f, err = tsParser.Decrypt()
+			f, err = tsParser.Decrypt(ctx)
 			if err != nil {
 				removeOnError = true
 				return err
