@@ -47,3 +47,31 @@ func TestCheckStatus(t *testing.T) {
 		})
 	}
 }
+
+// TestNewClientSendsBrowserHeaders guards against the 452 regression where the
+// main API client omitted the browser headers geektime requires on API calls
+// (Accept, Accept-Language, Referer) — the same set Auth() uses to avoid 452.
+// Commit b29e319 added these to Auth() but not NewClient, so every API call
+// (V1ArticleInfo, VideoPlayAuth, CourseInfo, ...) returned 452.
+func TestNewClientSendsBrowserHeaders(t *testing.T) {
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	c := NewClient(nil)
+	resp, err := c.RestyClient.R().Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode() != 200 {
+		t.Fatalf("want 200, got %d", resp.StatusCode())
+	}
+	for _, h := range []string{"Accept", "Accept-Language", "Referer", "User-Agent"} {
+		if got.Get(h) == "" {
+			t.Errorf("NewClient request missing header %q", h)
+		}
+	}
+}

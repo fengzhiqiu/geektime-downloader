@@ -53,8 +53,9 @@ func NewClient(cs []*http.Cookie) *Client {
 		SetCookies(cs).
 		SetRetryCount(1).
 		SetTimeout(DefaultTimeout).
-		SetHeader(UserAgent, DefaultUserAgent).
+		SetHeader(RefererHeader, DefaultReferer).
 		SetLogger(logger.DiscardLogger{})
+	ApplyBrowserHeaders(restyClient)
 
 	c := &Client{RestyClient: restyClient, Cookies: cs}
 	return c
