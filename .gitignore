@@ -5,6 +5,9 @@
 *.so
 *.dylib
 
+# Local build output (plain `go build .` writes ./geektime-downloader at repo root)
+/geektime-downloader
+
 # Test binary, built with `go test -c`
 *.test
 

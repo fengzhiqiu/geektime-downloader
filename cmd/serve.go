@@ -69,7 +69,7 @@ var serveCmd = &cobra.Command{
 		}, stats)
 		worker.Start(cmd.Context())
 
-		srv := api.NewServer(authMgr, store, worker, dlSvc, "dev", serveCfg.apiKey, worker.OnCookiesUpdated)
+		srv := api.NewServer(authMgr, store, worker, dlSvc, version, serveCfg.apiKey, worker.OnCookiesUpdated)
 		httpServer := &http.Server{
 			Addr:    serveCfg.addr,
 			Handler: srv.Handler(),
