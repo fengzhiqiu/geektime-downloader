@@ -1,7 +1,7 @@
 # 452 反爬误判与 PDF 渲染超时修复设计
 
 **日期：** 2026-07-19
-**状态：** 已评审，待实现
+**状态：** 已实现（commit 0dc8e5d, 8b49029, 978297a, 15f8385）
 **适用范围：** `geektime-downloader serve` 本地 HTTP API 服务（API 层 + PDF/chromedp 层）
 
 ---
