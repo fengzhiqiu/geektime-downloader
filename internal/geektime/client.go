@@ -93,10 +93,14 @@ func CheckStatus(resp *resty.Response) error {
 	}
 	logNotOkResponse(resp)
 	switch statusCode {
-	case 451:
+	case 451, 452:
+		// 451 and 452 are transient edge anti-bot blocks (empty body,
+		// self-healing, burst-correlated), not account expiry. Real account
+		// expiry surfaces via JSON code -3050/-2000 in do(), which still
+		// returns ErrAuthFailed. Map both to rate-limit so the worker
+		// applies its WAITING_RATE_LIMIT cooldown + auto-resume instead of
+		// demanding a pointless cookie refresh.
 		return ErrGeekTimeRateLimit
-	case 452:
-		return ErrAuthFailed
 	default:
 		return ErrGeekTimeAPIBadCode{
 			Path:           resp.RawResponse.Request.URL.String(),

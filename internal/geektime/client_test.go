@@ -17,7 +17,7 @@ func TestCheckStatus(t *testing.T) {
 		{200, nil},
 		{204, nil},
 		{451, ErrGeekTimeRateLimit},
-		{452, ErrAuthFailed},
+		{452, ErrGeekTimeRateLimit},
 		{500, ErrGeekTimeAPIBadCode{}},
 	}
 	for _, tc := range cases {
