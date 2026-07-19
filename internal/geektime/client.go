@@ -51,10 +51,24 @@ var (
 func NewClient(cs []*http.Cookie) *Client {
 	restyClient := resty.New().
 		SetCookies(cs).
-		SetRetryCount(1).
+		SetRetryCount(3).
+		SetRetryWaitTime(2 * time.Second).
+		SetRetryMaxWaitTime(10 * time.Second).
 		SetTimeout(DefaultTimeout).
 		SetHeader(RefererHeader, DefaultReferer).
-		SetLogger(logger.DiscardLogger{})
+		SetLogger(logger.DiscardLogger{}).
+		// resty's default retry only covers transport errors, not HTTP status.
+		// 451/452 are transient edge anti-bot blocks that self-heal within
+		// minutes (verified in logs), so retry them in-process before
+		// escalating to the worker cooldown. do()/CheckStatus observe only
+		// the final response.
+		AddRetryCondition(func(r *resty.Response, err error) bool {
+			if err != nil {
+				return true // transport / timeout errors
+			}
+			sc := r.StatusCode()
+			return sc == 451 || sc == 452 || sc >= 500
+		})
 	ApplyBrowserHeaders(restyClient)
 
 	c := &Client{RestyClient: restyClient, Cookies: cs}
