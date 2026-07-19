@@ -52,8 +52,8 @@ func NewClient(cs []*http.Cookie) *Client {
 	restyClient := resty.New().
 		SetCookies(cs).
 		SetRetryCount(3).
-		SetRetryWaitTime(2 * time.Second).
-		SetRetryMaxWaitTime(10 * time.Second).
+		SetRetryWaitTime(2*time.Second).
+		SetRetryMaxWaitTime(10*time.Second).
 		SetTimeout(DefaultTimeout).
 		SetHeader(RefererHeader, DefaultReferer).
 		SetLogger(logger.DiscardLogger{}).
