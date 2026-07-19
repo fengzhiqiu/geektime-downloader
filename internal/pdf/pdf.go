@@ -75,9 +75,9 @@ func PrintArticlePageToPDF(parentCtx context.Context,
 	defer listenerCtxCancel()
 
 	listener := func(ev interface{}) {
-		switch responseReceivedEvent := ev.(type) {
+		switch e := ev.(type) {
 		case *network.EventResponseReceived:
-			response := responseReceivedEvent.Response
+			response := e.Response
 			// rate limit detection
 			if response.URL == geektime.DefaultBaseURL+"/serv/v1/article" && response.Status == 451 {
 				logger.Warnf("Hit GeekTime rate limit when downloading article pdf, articleID: %d, pdfFileName: %s", aid, pdfFileName)
@@ -90,11 +90,26 @@ func PrintArticlePageToPDF(parentCtx context.Context,
 			// if downloadComments is DownloadCommentsAll, monitor comment list responses
 			if cfg.DownloadComments == DownloadCommentsAll {
 				if strings.Contains(strings.ToLower(response.URL), "comment/list") {
-					reqID := responseReceivedEvent.RequestID
+					reqID := e.RequestID
 					url := response.URL
 
 					fetchAndHandleCommentList(listenerCtx, reqID, url, &commentsDone)
 				}
+			}
+		case *network.EventLoadingFailed:
+			// Fast-fail when the main document load fails (e.g. an anti-bot
+			// auth block surfaced by Chrome as ERR_INVALID_AUTH_CREDENTIALS,
+			// ERR_BLOCKED_BY_CLIENT, etc.). Without this we would wait the
+			// full PrintPDFTimeoutSeconds and surface a generic context
+			// deadline exceeded. Routing to rateLimit returns
+			// ErrGeekTimeRateLimit so the worker applies its cooldown instead.
+			if e.Type == network.ResourceTypeDocument {
+				logger.Warnf("Article page load failed, articleID: %d, error: %s, pdfFileName: %s",
+					aid, e.ErrorText, pdfFileName)
+				rateLimit = true
+				timeoutCancel()
+				listenerCtxCancel()
+				return
 			}
 		}
 	}
@@ -105,7 +120,7 @@ func PrintArticlePageToPDF(parentCtx context.Context,
 		chromedp.Emulate(device.IPadPro11),
 		setCookies(cookies),
 		chromedp.Navigate(geektime.DefaultBaseURL + `/column/article/` + strconv.Itoa(aid)),
-		chromedp.Sleep(time.Duration(cfg.PrintPDFWaitSeconds) * time.Second),
+		waitArticleReady(),
 	}
 
 	switch cfg.DownloadComments {
@@ -130,6 +145,29 @@ func PrintArticlePageToPDF(parentCtx context.Context,
 	}
 
 	return nil
+}
+
+// waitArticleReady waits for the article body content node to become visible
+// instead of sleeping a fixed duration. It polls a set of candidate selectors
+// for the article body container (tolerating page markup variation across
+// revisions) and returns as soon as any is present and visible. The caller's
+// timeoutCtx (PrintPDFTimeoutSeconds) bounds the total wait, so a total
+// selector miss degrades to the prior timeout behavior rather than hanging.
+func waitArticleReady() chromedp.Action {
+	check := `(function(){
+		var sels = [
+			"div[class*='articleContent']",
+			"div[class*='ArticleContent']",
+			"div[class*='Index_articleContent']",
+			"article"
+		];
+		for (var i = 0; i < sels.length; i++) {
+			var el = document.querySelector(sels[i]);
+			if (el && el.offsetParent !== null) { return true; }
+		}
+		return false;
+	})()`
+	return chromedp.Poll(check, nil, chromedp.WithPollingInterval(200*time.Millisecond))
 }
 
 func setCookies(cookies []*http.Cookie) chromedp.ActionFunc {
