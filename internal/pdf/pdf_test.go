@@ -59,7 +59,7 @@ func TestPrintArticlePageToPDFLoadFailureReturnsRateLimit(t *testing.T) {
 	dir := t.TempDir()
 
 	start := time.Now()
-	err := PrintArticlePageToPDF(context.Background(), article, dir, nil, cfg)
+	err := PrintArticlePageToPDF(context.Background(), article, dir, nil, cfg, nil)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("want error, got nil")

@@ -51,90 +51,108 @@ type V4CommentListResponse struct {
 	} `json:"extra"`
 }
 
-// PrintArticlePageToPDF use chromedp to print article page and save
+// PrintArticlePageToPDF use chromedp to print article page and save.
+// If pool is non-nil, the article is rendered in a new tab on the pool's
+// long-lived browser (stable fingerprint, avoids per-article anti-bot
+// blocks). If pool is nil (CLI path), a fresh browser is allocated per
+// article (legacy behavior).
 func PrintArticlePageToPDF(parentCtx context.Context,
 	article geektime.Article,
 	dir string,
 	cookies []*http.Cookie,
 	cfg *config.AppConfig,
+	pool *BrowserPool,
 ) error {
 	rateLimit := false
 	aid := article.AID
 
 	pdfFileName := filepath.Join(dir, filenamify.Filenamify(article.Title)+PDFExtension)
 
-	chromeCtx, chromeCancel := chromedp.NewContext(parentCtx)
-	defer chromeCancel()
+	// runInBrowser executes the chromedp work against the given browser
+	// context. When pool != nil this is the shared long-lived browser;
+	// otherwise it is parentCtx (fresh browser per article).
+	runInBrowser := func(browserCtx context.Context) error {
+		chromeCtx, chromeCancel := chromedp.NewContext(browserCtx)
+		defer chromeCancel()
 
-	timeoutCtx, timeoutCancel := context.WithTimeout(chromeCtx, time.Duration(cfg.PrintPDFTimeoutSeconds)*time.Second)
-	defer timeoutCancel()
+		timeoutCtx, timeoutCancel := context.WithTimeout(chromeCtx, time.Duration(cfg.PrintPDFTimeoutSeconds)*time.Second)
+		defer timeoutCancel()
 
-	var commentsDone uint32 = 0
+		var commentsDone uint32 = 0
 
-	listenerCtx, listenerCtxCancel := context.WithCancel(timeoutCtx)
-	defer listenerCtxCancel()
+		listenerCtx, listenerCtxCancel := context.WithCancel(timeoutCtx)
+		defer listenerCtxCancel()
 
-	listener := func(ev interface{}) {
-		switch e := ev.(type) {
-		case *network.EventResponseReceived:
-			response := e.Response
-			// rate limit detection
-			if response.URL == geektime.DefaultBaseURL+"/serv/v1/article" && response.Status == 451 {
-				logger.Warnf("Hit GeekTime rate limit when downloading article pdf, articleID: %d, pdfFileName: %s", aid, pdfFileName)
-				rateLimit = true
-				timeoutCancel()
-				listenerCtxCancel()
-				return
-			}
+		listener := func(ev interface{}) {
+			switch e := ev.(type) {
+			case *network.EventResponseReceived:
+				response := e.Response
+				// rate limit detection
+				if response.URL == geektime.DefaultBaseURL+"/serv/v1/article" && response.Status == 451 {
+					logger.Warnf("Hit GeekTime rate limit when downloading article pdf, articleID: %d, pdfFileName: %s", aid, pdfFileName)
+					rateLimit = true
+					timeoutCancel()
+					listenerCtxCancel()
+					return
+				}
 
-			// if downloadComments is DownloadCommentsAll, monitor comment list responses
-			if cfg.DownloadComments == DownloadCommentsAll {
-				if strings.Contains(strings.ToLower(response.URL), "comment/list") {
-					reqID := e.RequestID
-					url := response.URL
+				// if downloadComments is DownloadCommentsAll, monitor comment list responses
+				if cfg.DownloadComments == DownloadCommentsAll {
+					if strings.Contains(strings.ToLower(response.URL), "comment/list") {
+						reqID := e.RequestID
+						url := response.URL
 
-					fetchAndHandleCommentList(listenerCtx, reqID, url, &commentsDone)
+						fetchAndHandleCommentList(listenerCtx, reqID, url, &commentsDone)
+					}
+				}
+			case *network.EventLoadingFailed:
+				// Fast-fail when the main document load fails (e.g. an anti-bot
+				// auth block surfaced by Chrome as ERR_INVALID_AUTH_CREDENTIALS,
+				// ERR_BLOCKED_BY_CLIENT, etc.). Without this we would wait the
+				// full PrintPDFTimeoutSeconds and surface a generic context
+				// deadline exceeded. Routing to rateLimit returns
+				// ErrGeekTimeRateLimit so the worker applies its cooldown instead.
+				if e.Type == network.ResourceTypeDocument {
+					logger.Warnf("Article page load failed, articleID: %d, error: %s, pdfFileName: %s",
+						aid, e.ErrorText, pdfFileName)
+					rateLimit = true
+					timeoutCancel()
+					listenerCtxCancel()
+					return
 				}
 			}
-		case *network.EventLoadingFailed:
-			// Fast-fail when the main document load fails (e.g. an anti-bot
-			// auth block surfaced by Chrome as ERR_INVALID_AUTH_CREDENTIALS,
-			// ERR_BLOCKED_BY_CLIENT, etc.). Without this we would wait the
-			// full PrintPDFTimeoutSeconds and surface a generic context
-			// deadline exceeded. Routing to rateLimit returns
-			// ErrGeekTimeRateLimit so the worker applies its cooldown instead.
-			if e.Type == network.ResourceTypeDocument {
-				logger.Warnf("Article page load failed, articleID: %d, error: %s, pdfFileName: %s",
-					aid, e.ErrorText, pdfFileName)
-				rateLimit = true
-				timeoutCancel()
-				listenerCtxCancel()
-				return
-			}
 		}
+		chromedp.ListenTarget(listenerCtx, listener)
+
+		tasks := chromedp.Tasks{
+			network.Enable(),
+			chromedp.Emulate(device.IPadPro11),
+			setCookies(cookies),
+			chromedp.Navigate(geektime.DefaultBaseURL + `/column/article/` + strconv.Itoa(aid)),
+			waitArticleReady(),
+		}
+
+		switch cfg.DownloadComments {
+		case DownloadCommentsAll:
+			tasks = append(tasks, touchScrollAction(&commentsDone))
+		case DownloadCommentsNone:
+			tasks = append(tasks, hideCommentsBlock())
+		}
+
+		tasks = append(tasks, hideRedundantElements(), printToPDF(pdfFileName))
+
+		logger.Infof("Begin download article pdf, articleID: %d, pdfFileName: %s", aid, pdfFileName)
+
+		return chromedp.Run(timeoutCtx, tasks)
 	}
-	chromedp.ListenTarget(listenerCtx, listener)
 
-	tasks := chromedp.Tasks{
-		network.Enable(),
-		chromedp.Emulate(device.IPadPro11),
-		setCookies(cookies),
-		chromedp.Navigate(geektime.DefaultBaseURL + `/column/article/` + strconv.Itoa(aid)),
-		waitArticleReady(),
+	var err error
+	if pool != nil {
+		err = pool.WithBrowser(parentCtx, runInBrowser)
+	} else {
+		err = runInBrowser(parentCtx)
 	}
 
-	switch cfg.DownloadComments {
-	case DownloadCommentsAll:
-		tasks = append(tasks, touchScrollAction(&commentsDone))
-	case DownloadCommentsNone:
-		tasks = append(tasks, hideCommentsBlock())
-	}
-
-	tasks = append(tasks, hideRedundantElements(), printToPDF(pdfFileName))
-
-	logger.Infof("Begin download article pdf, articleID: %d, pdfFileName: %s", aid, pdfFileName)
-
-	err := chromedp.Run(timeoutCtx, tasks)
 	if err != nil {
 		if rateLimit {
 			logger.Warnf("Hit GeekTime rate limit when downloading article pdf, articleID: %d, pdfFileName: %s", aid, pdfFileName)
