@@ -1,7 +1,7 @@
 # 进程级长驻浏览器修复 PDF 反爬拦截设计
 
 **日期：** 2026-07-20
-**状态：** 已评审，待实现
+**状态：** 已实现（commit 3120ebf, 55f8a23, 8f04458, cef48a4）
 **适用范围：** `geektime-downloader serve` 本地 HTTP API 服务（PDF/chromedp 层）
 
 ---
