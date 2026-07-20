@@ -13,6 +13,7 @@ import (
 	"github.com/nicoxiang/geektime-downloader/internal/auth"
 	"github.com/nicoxiang/geektime-downloader/internal/config"
 	"github.com/nicoxiang/geektime-downloader/internal/job"
+	"github.com/nicoxiang/geektime-downloader/internal/pdf"
 	"github.com/nicoxiang/geektime-downloader/internal/pkg/logger"
 	"github.com/nicoxiang/geektime-downloader/internal/service"
 )
@@ -60,7 +61,9 @@ var serveCmd = &cobra.Command{
 			return err
 		}
 
-		dlSvc := service.NewDownloadService(&cfg, authMgr.GetClient())
+		browserPool := pdf.NewBrowserPool(cmd.Context())
+		defer browserPool.Close()
+		dlSvc := service.NewDownloadService(&cfg, authMgr.GetClient(), browserPool)
 		stats := &job.Stats{}
 		worker := job.NewWorker(store, dlSvc, authMgr.GetClient, job.Stability{
 			JobTimeout:        cfg.JobTimeout,
