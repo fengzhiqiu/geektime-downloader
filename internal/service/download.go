@@ -8,6 +8,7 @@ import (
 	"github.com/nicoxiang/geektime-downloader/internal/config"
 	coursedl "github.com/nicoxiang/geektime-downloader/internal/course"
 	"github.com/nicoxiang/geektime-downloader/internal/geektime"
+	"github.com/nicoxiang/geektime-downloader/internal/pdf"
 	"github.com/nicoxiang/geektime-downloader/internal/progress"
 )
 
@@ -45,11 +46,12 @@ type DownloadRequest struct {
 type DownloadService struct {
 	baseCfg *config.AppConfig
 	client  *geektime.Client
+	pool    *pdf.BrowserPool
 }
 
 // NewDownloadService creates a DownloadService.
-func NewDownloadService(baseCfg *config.AppConfig, client *geektime.Client) *DownloadService {
-	return &DownloadService{baseCfg: baseCfg, client: client}
+func NewDownloadService(baseCfg *config.AppConfig, client *geektime.Client, pool *pdf.BrowserPool) *DownloadService {
+	return &DownloadService{baseCfg: baseCfg, client: client, pool: pool}
 }
 
 // SetClient updates the geektime client (e.g. after cookie refresh).
@@ -120,7 +122,7 @@ func (s *DownloadService) ExecuteDownload(
 		return geektime.Course{}, "", &apperr.APIError{Code: apperr.CodeBadRequest, Message: "unknown product_type", HTTPStatus: 400}
 	}
 	cfg := mergeConfig(s.baseCfg, req.Options, req.Enterprise)
-	downloader := coursedl.NewCourseDownloader(ctx, cfg, s.client, nil, reporter)
+	downloader := coursedl.NewCourseDownloader(ctx, cfg, s.client, nil, reporter, s.pool)
 
 	switch req.Mode {
 	case "single_video":

@@ -41,9 +41,10 @@ type CourseDownloader struct {
 	waitRand           *rand.Rand
 	downloadingSpinner *spinner.Spinner
 	progressReporter   progress.Reporter
+	pool               *pdf.BrowserPool
 }
 
-func NewCourseDownloader(ctx context.Context, cfg *config.AppConfig, geektimeClient *geektime.Client, sp *spinner.Spinner, reporter progress.Reporter) *CourseDownloader {
+func NewCourseDownloader(ctx context.Context, cfg *config.AppConfig, geektimeClient *geektime.Client, sp *spinner.Spinner, reporter progress.Reporter, pool *pdf.BrowserPool) *CourseDownloader {
 	concurrency := int(math.Ceil(float64(runtime.NumCPU()) / 2.0))
 	if concurrency <= 0 {
 		concurrency = 1
@@ -56,6 +57,7 @@ func NewCourseDownloader(ctx context.Context, cfg *config.AppConfig, geektimeCli
 		waitRand:           rand.New(rand.NewSource(time.Now().UnixNano())),
 		downloadingSpinner: sp,
 		progressReporter:   reporter,
+		pool:               pool,
 	}
 }
 
@@ -252,6 +254,7 @@ func (d *CourseDownloader) downloadTextArticle(article geektime.Article, columnD
 			columnDir,
 			d.geektimeClient.Cookies,
 			d.cfg,
+			d.pool,
 		); err != nil {
 			return err
 		}
