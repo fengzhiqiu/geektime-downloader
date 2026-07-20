@@ -2,6 +2,7 @@ package pdf
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -82,12 +83,30 @@ func (p *BrowserPool) getOrCreate(ctx context.Context) (context.Context, error) 
 	browserCtx, browserCxl := chromedp.NewContext(alloc)
 
 	// Force the browser to allocate now so failures surface here, not in the
-	// first tab. Bound by the caller's ctx so a hung Chrome doesn't block.
-	allocRunCtx, allocRunCancel := context.WithTimeout(ctx, 60*time.Second)
-	defer allocRunCancel()
-	if err := chromedp.Run(allocRunCtx); err != nil {
+	// first tab. Run must be called on browserCtx (a chromedp context); calling
+	// it on a plain context.WithTimeout(ctx) returns ErrInvalidContext because
+	// that context carries no chromedp Context value.
+	//
+	// chromedp warns against attaching a timeout to the first Run's context
+	// (it would tear down the whole browser), so we run Run(browserCtx) in a
+	// goroutine and bound the wait with the caller's ctx instead. On caller
+	// timeout we cancel the browser context and treat allocation as failed.
+	allocErr := make(chan error, 1)
+	go func() {
+		allocErr <- chromedp.Run(browserCtx)
+	}()
+	select {
+	case err := <-allocErr:
+		if err != nil {
+			browserCxl()
+			return nil, err
+		}
+	case <-ctx.Done():
 		browserCxl()
-		return nil, err
+		return nil, ctx.Err()
+	case <-time.After(60 * time.Second):
+		browserCxl()
+		return nil, fmt.Errorf("chrome allocation timed out after 60s")
 	}
 
 	p.browserCtx = browserCtx
