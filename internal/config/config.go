@@ -44,9 +44,10 @@ func BuildCookies(gcid, gcess string) []*http.Cookie {
 	c := 0
 	for k, v := range m {
 		cookies[c] = &http.Cookie{
-			Name:     k,
-			Value:    v,
-			Domain:   geektime.GeekBangCookieDomain,
+			Name:   k,
+			Value:  v,
+			Domain: geektime.GeekBangCookieDomain,
+			Path:   "/",
 			HttpOnly: true,
 			Expires:  oneyear,
 		}

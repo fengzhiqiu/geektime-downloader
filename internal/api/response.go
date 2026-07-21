@@ -78,6 +78,7 @@ func chromeAvailable() bool {
 		"/usr/bin/google-chrome",
 		"/usr/bin/chromium",
 		"/usr/bin/chromium-browser",
+		"/home/allen/.local/bin/google-chrome",
 	} {
 		if _, err := os.Stat(p); err == nil {
 			return true
