@@ -29,6 +29,19 @@ import (
 // PDFExtension ...
 const PDFExtension = ".pdf"
 
+// CopyCookies copies cookies into a chromedp context.
+func CopyCookies(chromeCtx context.Context, cookies []*http.Cookie) error {
+	return chromedp.Run(chromeCtx, chromedp.ActionFunc(func(ctx context.Context) error {
+		expr := cdp.TimeSinceEpoch(time.Now().Add(180 * 24 * time.Hour))
+		for _, c := range cookies {
+			if err := network.SetCookie(c.Name, c.Value).WithExpires(&expr).WithDomain(geektime.GeekBangCookieDomain).WithPath("/").WithHTTPOnly(true).Do(ctx); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+}
+
 // DownloadCommentsMode values for PrintArticlePageToPDF
 const (
 	DownloadCommentsNone = iota
@@ -68,11 +81,33 @@ func PrintArticlePageToPDF(parentCtx context.Context,
 
 	pdfFileName := filepath.Join(dir, filenamify.Filenamify(article.Title)+PDFExtension)
 
+	allocatorOpts := []chromedp.ExecAllocatorOption{
+		chromedp.Flag("disable-blink-features", "AutomationControlled"),
+		chromedp.Flag("disable-gpu", true),
+		chromedp.Flag("no-sandbox", true),
+		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.NoDefaultBrowserCheck,
+		chromedp.UserDataDir("/home/allen/.local/share/google-chrome"),
+		chromedp.Flag("headless", "new"),
+		chromedp.Flag("no-proxy-server", true),
+		chromedp.Flag("proxy-bypass-list", "*"),
+		chromedp.Flag("disable-extensions", true),
+		chromedp.Flag("disable-sync", true),
+	}
+	if path := os.Getenv("CHROME_PATH"); path != "" {
+		allocatorOpts = append(allocatorOpts, chromedp.ExecPath(path))
+	} else if _, err := os.Stat("/home/allen/.local/bin/google-chrome"); err == nil {
+		allocatorOpts = append(allocatorOpts, chromedp.ExecPath("/home/allen/.local/bin/google-chrome"))
+	}
+
+	allocatorCtx, allocatorCancel := chromedp.NewExecAllocator(parentCtx, allocatorOpts...)
+	defer allocatorCancel()
+
 	// runInBrowser executes the chromedp work against the given browser
 	// context. When pool != nil this is the shared long-lived browser;
 	// otherwise it is parentCtx (fresh browser per article).
 	runInBrowser := func(browserCtx context.Context) error {
-		chromeCtx, chromeCancel := chromedp.NewContext(browserCtx)
+		chromeCtx, chromeCancel := chromedp.NewContext(allocatorCtx)
 		defer chromeCancel()
 
 		timeoutCtx, timeoutCancel := context.WithTimeout(chromeCtx, time.Duration(cfg.PrintPDFTimeoutSeconds)*time.Second)
@@ -193,7 +228,7 @@ func setCookies(cookies []*http.Cookie) chromedp.ActionFunc {
 		expr := cdp.TimeSinceEpoch(time.Now().Add(180 * 24 * time.Hour))
 
 		for _, c := range cookies {
-			err := network.SetCookie(c.Name, c.Value).WithExpires(&expr).WithDomain(geektime.GeekBangCookieDomain).WithHTTPOnly(true).Do(ctx)
+			err := network.SetCookie(c.Name, c.Value).WithExpires(&expr).WithDomain(geektime.GeekBangCookieDomain).WithPath("/").WithHTTPOnly(true).Do(ctx)
 			if err != nil {
 				return err
 			}
